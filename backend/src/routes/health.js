@@ -5,7 +5,7 @@ export const healthRouter = Router();
 healthRouter.get("/", (_req, res) => {
   res.json({
     status: "ok",
-    version:3,
+    version:4,
     timestamp: new Date().toISOString(),
   });
 });
