@@ -22,6 +22,7 @@ jobs:
   deploy:
     name: Deploy to AWS EC2
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Load SSH private key
@@ -29,33 +30,81 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.EC2_SSH_KEY }}
 
-      - name: Connect and deploy
+      - name: Configure SSH
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          set -eu
+
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          # Add the server host key to known_hosts.
+          # For production, verify this fingerprint independently.
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Deploy backend
         env:
           EC2_HOST: ${{ secrets.EC2_HOST }}
           EC2_USER: ${{ secrets.EC2_USER }}
         run: |
           set -eu
 
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
-          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
+          ssh \
+            -o BatchMode=yes \
+            -o ConnectTimeout=15 \
+            "$EC2_USER@$EC2_HOST" 'bash -se' <<'REMOTE'
+              set -eu
 
-          ssh "$EC2_USER@$EC2_HOST" 'bash -se' <<'REMOTE'
-            set -e
-            cd ~/aws-practice
+              echo "Starting backend deployment..."
 
-            git pull --ff-only origin main
+              cd ~/aws-practice
 
-            cd backend
+              echo "Pulling latest code..."
+              git pull --ff-only origin main
 
-            if [ -f package-lock.json ]; then
-              npm ci
-            else
-              npm install
-            fi
+              cd backend
 
-            pm2 restart aws-practice-api --update-env
-            pm2 status
-            curl --fail --silent --show-error http://localhost:3000/api/health
-            echo
+              echo "Installing dependencies..."
+              if [ -f package-lock.json ]; then
+                npm ci
+              else
+                npm install
+              fi
+
+              echo "Restarting PM2 process..."
+              pm2 restart aws-practice-api --update-env
+
+              echo "Current PM2 status:"
+              pm2 status
+
+              echo "Waiting for API health check..."
+
+              HEALTH_URL="http://localhost:3000/api/health"
+
+              for i in $(seq 1 15); do
+                if curl \
+                  --fail \
+                  --silent \
+                  --show-error \
+                  --max-time 3 \
+                  "$HEALTH_URL"; then
+                  echo
+                  echo "Deployment and health check succeeded."
+                  exit 0
+                fi
+
+                echo "API not ready yet (attempt $i/15)."
+
+                if [ "$i" -lt 15 ]; then
+                  sleep 2
+                fi
+              done
+
+              echo "Health check failed after retries."
+              echo "Recent PM2 logs:"
+              pm2 logs aws-practice-api --lines 50 --nostream || true
+
+              exit 1
           REMOTE
