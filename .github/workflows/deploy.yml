@@ -36,20 +36,56 @@ jobs:
         run: |
           set -eu
 
+          if [ -z "${EC2_HOST:-}" ]; then
+            echo "::error::EC2_HOST secret is missing or empty. Add the instance public IPv4 or DNS (host only, no user@)."
+            exit 1
+          fi
+
+          # Allow secrets pasted as user@host or with accidental whitespace.
+          EC2_HOST="$(printf '%s' "$EC2_HOST" | tr -d '[:space:]')"
+          EC2_HOST="${EC2_HOST#*@}"
+          EC2_HOST="${EC2_HOST#ssh://}"
+          EC2_HOST="${EC2_HOST%%/*}"
+
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
+          touch ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
 
           # Add the server host key to known_hosts.
           # For production, verify this fingerprint independently.
-          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
-          chmod 600 ~/.ssh/known_hosts
+          keyscan_ok=0
+          for attempt in 1 2 3; do
+            if ssh-keyscan -H -T 20 -p 22 "$EC2_HOST" >> ~/.ssh/known_hosts 2>keyscan.err; then
+              if [ -s ~/.ssh/known_hosts ]; then
+                keyscan_ok=1
+                break
+              fi
+            fi
+            echo "ssh-keyscan attempt $attempt/3 failed; retrying in 5s..."
+            cat keyscan.err || true
+            sleep 5
+          done
+
+          if [ "$keyscan_ok" -ne 1 ]; then
+            echo "::error::Could not fetch SSH host key for '$EC2_HOST'."
+            echo "Check: instance is running, EC2_HOST is the public IP/DNS, security group allows inbound TCP 22 from the internet (GitHub-hosted runners use changing public IPs)."
+            cat keyscan.err || true
+            exit 1
+          fi
+
+          echo "EC2_HOST=$EC2_HOST" >> "$GITHUB_ENV"
 
       - name: Deploy backend
         env:
-          EC2_HOST: ${{ secrets.EC2_HOST }}
           EC2_USER: ${{ secrets.EC2_USER }}
         run: |
           set -eu
+
+          if [ -z "${EC2_USER:-}" ]; then
+            echo "::error::EC2_USER secret is missing or empty (e.g. ec2-user, ubuntu)."
+            exit 1
+          fi
 
           ssh \
             -o BatchMode=yes \
