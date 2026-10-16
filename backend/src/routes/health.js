@@ -5,7 +5,7 @@ export const healthRouter = Router();
 
 healthRouter.get("/", (_req, res) => {
   res.json({
-    status: "ok",
+    status: "okk",
     env: env.nodeEnv,
     awsRegion: env.aws.region,
     timestamp: new Date().toISOString(),
